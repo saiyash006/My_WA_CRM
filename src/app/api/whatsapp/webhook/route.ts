@@ -155,106 +155,142 @@ export async function GET(request: Request) {
   }
 }
 
-// POST - Receive messages
+// POST - Incoming messages
 export async function POST(request: Request) {
-  // Read raw body first so we can HMAC-verify the exact bytes Meta
-  // signed. request.json() would re-encode and break the signature.
-  const rawBody = await request.text()
-  const signature = request.headers.get('x-hub-signature-256')
-
-  if (!verifyMetaWebhookSignature(rawBody, signature)) {
-    // 401 (not 200) — we want Meta's delivery dashboard to show failures
-    // loudly if a misconfiguration causes signatures to stop matching,
-    // rather than silently eating events.
-    console.warn('[webhook] rejected request with invalid signature')
-    return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
-  }
-
-  let body: { entry?: WhatsAppWebhookEntry[] }
+  console.log('Webhook POST request received');
   try {
-    body = JSON.parse(rawBody)
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+    const signature = request.headers.get('x-hub-signature-v2')
+    if (!signature) {
+      console.error('Missing x-hub-signature-v2 header');
+      return NextResponse.json({ error: 'Missing signature' }, { status: 401 })
+    }
+
+    const body = await request.text()
+    if (!verifyMetaWebhookSignature(body, signature)) {
+      console.error('Invalid webhook signature');
+      return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
+    }
+    console.log('Webhook signature verified');
+
+    const data = JSON.parse(body)
+    if (!data.entry || !data.entry[0]?.changes?.[0]?.value) {
+      console.log('Webhook received non-message payload:', data);
+      return NextResponse.json({ consumed: false, reason: 'not a message' })
+    }
+
+    const { metadata, messages, statuses, contacts } = data.entry[0].changes[0].value
+    if (!metadata) {
+      console.log('Webhook received payload without metadata:', data.entry[0].changes[0].value);
+      return NextResponse.json({ consumed: false, reason: 'no metadata' })
+    }
+    console.log('Webhook metadata found:', metadata);
+
+    // Find the user this phone number belongs to
+    const { data: config, error: configError } = await supabaseAdmin()
+      .from('whatsapp_config')
+      .select('user_id, access_token, phone_number_id, is_legacy_encryption, encryption_key')
+      .eq('phone_number_id', metadata.phone_number_id)
+      .single()
+
+    if (configError || !config) {
+      console.error(`No config found for phone_number_id ${metadata.phone_number_id}`, configError);
+      return NextResponse.json({ consumed: false, reason: 'no config for number' })
+    }
+    console.log(`Config found for user ${config.user_id}`);
+
+    // Process status updates
+    if (statuses) {
+      console.log(`Processing ${statuses.length} status updates.`);
+      await processStatuses(statuses, config.user_id)
+      return NextResponse.json({ consumed: true })
+    }
+
+    // Process incoming messages
+    if (messages && contacts) {
+      console.log(`Processing ${messages.length} incoming messages.`);
+      await processMessages(messages, contacts, config)
+      return NextResponse.json({ consumed: true })
+    }
+
+    console.log('Webhook received payload with no messages or statuses to process.');
+    return NextResponse.json({ consumed: false, reason: 'no messages or statuses' })
+  } catch (e) {
+    console.error('Error processing webhook:', e)
+    const errorMessage = e instanceof Error ? e.message : String(e)
+    return NextResponse.json({ error: errorMessage }, { status: 500 })
   }
-
-  // Process asynchronously so we can ack Meta within their timeout.
-  processWebhook(body).catch((error) => {
-    console.error('Error processing webhook:', error)
-  })
-
-  return NextResponse.json({ status: 'received' }, { status: 200 })
 }
 
-async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
-  if (!body.entry) return
+/**
+ * Processes the status updates from the webhook.
+ */
+async function processStatuses(statuses: Array<{ id: string; status: string; timestamp: string; recipient_id: string }>, userId: string) {
+  for (const status of statuses) {
+    // 1) Mirror onto messages (legacy behavior) — Meta's status values
+    //    already match the CHECK constraint on messages.status.
+    const { error: msgErr } = await supabaseAdmin()
+      .from('messages')
+      .update({ status: status.status })
+      .eq('message_id', status.id)
 
-  for (const entry of body.entry) {
-    for (const change of entry.changes) {
-      const value = change.value
-
-      // Handle status updates
-      if (value.statuses) {
-        for (const status of value.statuses) {
-          await handleStatusUpdate(status)
-        }
-      }
-
-      // Handle incoming messages
-      if (!value.messages || !value.contacts) continue
-
-      const phoneNumberId = value.metadata.phone_number_id
-
-      // Find user's config by phone_number_id. `.single()` returns
-      // PGRST116 for both 0 rows AND ≥2 rows — distinguish them so
-      // operators see the real cause in logs. ≥2 rows shouldn't happen
-      // post-migration 013 (UNIQUE constraint), but a row created
-      // before the constraint, or a race, would still surface here.
-      const { data: configRows, error: configError } = await supabaseAdmin()
-        .from('whatsapp_config')
-        .select('*')
-        .eq('phone_number_id', phoneNumberId)
-
-      if (configError) {
-        console.error(
-          'Error fetching whatsapp_config for phone_number_id:',
-          phoneNumberId,
-          configError
-        )
-        continue
-      }
-
-      if (!configRows || configRows.length === 0) {
-        console.error('No config found for phone_number_id:', phoneNumberId)
-        continue
-      }
-
-      if (configRows.length > 1) {
-        console.error(
-          `Multiple configs (${configRows.length}) found for phone_number_id:`,
-          phoneNumberId,
-          '— inbound message dropped. Resolve duplicates so each number maps to a single user.',
-          'Owners:',
-          configRows.map((r: { user_id: string }) => r.user_id)
-        )
-        continue
-      }
-
-      const config = configRows[0]
-
-      const decryptedAccessToken = decrypt(config.access_token)
-
-      for (let i = 0; i < value.messages.length; i++) {
-        const message = value.messages[i]
-        const contact = value.contacts[i] || value.contacts[0]
-
-        await processMessage(
-          message,
-          contact,
-          config.user_id,
-          decryptedAccessToken
-        )
-      }
+    if (msgErr) {
+      console.error('Error updating message status:', msgErr)
     }
+
+    // 2) Mirror onto broadcast_recipients via whatsapp_message_id
+    //    (added in migration 003). The aggregate trigger on
+    //    broadcast_recipients re-derives the parent broadcast's
+    //    sent/delivered/read/failed counts automatically.
+    const tsIso = new Date(parseInt(status.timestamp) * 1000).toISOString()
+
+    const { data: recipient, error: recFetchErr } = await supabaseAdmin()
+      .from('broadcast_recipients')
+      .select('id, status')
+      .eq('whatsapp_message_id', status.id)
+      .maybeSingle()
+
+    if (recFetchErr) {
+      console.error('Error fetching broadcast recipient:', recFetchErr)
+      return
+    }
+    if (!recipient) return // message wasn't part of a broadcast — fine
+
+    // Guard transitions — forward-only on the success ladder, and
+    // `failed` only from pre-delivered states.
+    if (!isValidStatusTransition(recipient.status, status.status)) return
+
+    const update: Record<string, unknown> = { status: status.status }
+    if (status.status === 'sent' && !('sent_at' in update)) update.sent_at = tsIso
+    if (status.status === 'delivered') update.delivered_at = tsIso
+    if (status.status === 'read') update.read_at = tsIso
+
+    const { error: recUpdateErr } = await supabaseAdmin()
+      .from('broadcast_recipients')
+      .update(update)
+      .eq('id', recipient.id)
+
+    if (recUpdateErr) {
+      console.error('Error updating broadcast recipient status:', recUpdateErr)
+    }
+  }
+}
+
+/**
+ * Processes the incoming messages from the webhook.
+ */
+async function processMessages(messages: WhatsAppMessage[], contacts: Array<{ profile: { name: string }; wa_id: string }>, config: any) {
+  const decryptedAccessToken = decrypt(config.access_token)
+
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]
+    const contact = contacts[i] || contacts[0]
+
+    await processMessage(
+      message,
+      contact,
+      config.user_id,
+      decryptedAccessToken
+    )
   }
 }
 
