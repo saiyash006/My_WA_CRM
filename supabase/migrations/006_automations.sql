@@ -1,4 +1,9 @@
 -- ============================================================
+-- Enable UUID generation
+-- ============================================================
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- ============================================================
 -- 006_automations.sql — Automations feature
 --
 -- Idempotent migration — safe to run multiple times.
