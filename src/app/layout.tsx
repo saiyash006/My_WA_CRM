@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Inter as FontSans } from "next/font/google";
 import Script from "next/script";
 import { Toaster } from "sonner";
+import { SpeedInsights } from "@vercel/speed-insights/next";
 import "./globals.css";
 import { ThemeProvider } from "@/hooks/use-theme";
 import { DEFAULT_THEME, STORAGE_KEY, THEME_IDS } from "@/lib/themes";
@@ -99,6 +100,7 @@ export default function RootLayout({
               },
             }}
           />
+          <SpeedInsights />
         </ThemeProvider>
       </body>
     </html>
