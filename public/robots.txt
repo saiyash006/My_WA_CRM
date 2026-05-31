@@ -1,0 +1,7 @@
+# Allow all crawlers, including Facebook's, to access the site.
+User-agent: *
+Allow: /
+
+# Specifically allow Facebook's crawler as recommended by their debugger.
+User-agent: facebookexternalhit
+Allow: /
