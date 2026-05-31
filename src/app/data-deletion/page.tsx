@@ -21,7 +21,34 @@ export default function DataDeletionPage() {
 
           <h2>How to Request Data Deletion</h2>
           <p>
-            To request the deletion of your account and all associated data, please follow these steps:
+            You can remove your data by following either of the two methods below.
+          </p>
+
+          <h3>Method 1: Remove the App from Facebook</h3>
+          <p>
+            This is the fastest way to have your data removed. By removing the app from your Facebook account, your data will be automatically scheduled for deletion from our systems.
+          </p>
+          <ol>
+            <li>
+              Go to your Facebook profile's{' '}
+              <a
+                href="https://www.facebook.com/settings/?tab=applications"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Apps and Websites settings
+              </a>
+              .
+            </li>
+            <li>
+              Find "astrology" in your list of active apps.
+            </li>
+            <li>Click the "Remove" button next to it.</li>
+          </ol>
+
+          <h3>Method 2: Request Deletion via Email</h3>
+          <p>
+            If you prefer, you can request deletion by sending us an email.
           </p>
           <ol>
             <li>
