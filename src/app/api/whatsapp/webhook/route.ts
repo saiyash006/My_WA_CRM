@@ -159,9 +159,9 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   console.log('Webhook POST request received');
   try {
-    const signature = request.headers.get('x-hub-signature-v2')
+    const signature = request.headers.get('x-hub-signature-256')
     if (!signature) {
-      console.error('Missing x-hub-signature-v2 header');
+      console.error('Missing x-hub-signature-256 header');
       return NextResponse.json({ error: 'Missing signature' }, { status: 401 })
     }
 
