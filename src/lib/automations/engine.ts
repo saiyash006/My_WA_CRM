@@ -555,23 +555,39 @@ async function appendResults(
 ) {
   if (!logId) return
   const db = supabaseAdmin()
-  const { data: existing } = await db
-    .from('automation_logs')
-    .select('steps_executed, status')
-    .eq('id', logId)
-    .single()
-  const merged = [
-    ...((existing?.steps_executed as AutomationLogStepResult[] | undefined) ?? []),
-    ...newItems,
-  ]
-  const update: Record<string, unknown> = { steps_executed: merged }
-  // Only overwrite status on the outermost scope — nested branches pass null.
-  if (status !== null) {
-    update.status = status
+  // Atomically append newItems to steps_executed using Postgres jsonb
+  // concatenation (||) so concurrent branch scopes never overwrite each
+  // other's results with a stale read-modify-write cycle.
+  const updates: Record<string, unknown> = {}
+  if (status !== null) updates.status = status
+  if (errorMessage) updates.error_message = errorMessage
+
+  if (newItems.length > 0) {
+    // Use rpc to atomically append; fall back to merge if rpc not available.
+    const { error: rpcErr } = await db.rpc('append_automation_log_steps', {
+      p_log_id: logId,
+      p_new_steps: newItems,
+    })
+    if (rpcErr) {
+      // Fallback: read-modify-write (non-atomic but better than nothing)
+      const { data: existing } = await db
+        .from('automation_logs')
+        .select('steps_executed')
+        .eq('id', logId)
+        .single()
+      const merged = [
+        ...((existing?.steps_executed as AutomationLogStepResult[] | undefined) ?? []),
+        ...newItems,
+      ]
+      updates.steps_executed = merged
+    }
   }
-  if (errorMessage) update.error_message = errorMessage
-  await db.from('automation_logs').update(update).eq('id', logId)
+
+  if (Object.keys(updates).length > 0) {
+    await db.from('automation_logs').update(updates).eq('id', logId)
+  }
 }
+
 
 async function finalizeLog(
   logId: string | null,
