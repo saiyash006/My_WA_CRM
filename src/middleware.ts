@@ -23,6 +23,12 @@ export async function middleware(request: NextRequest) {
     }
   )
 
+  // Bypass middleware for crawlers
+  const isCrawler = /bot|crawl|slurp|spider|facebookexternalhit/i.test(request.headers.get('user-agent') || '')
+  if (isCrawler) {
+    return supabaseResponse
+  }
+
   const { data: { user } } = await supabase.auth.getUser()
 
   // Auth pages - redirect to dashboard if already logged in
